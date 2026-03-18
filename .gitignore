@@ -1,0 +1,7 @@
+﻿__pycache__/
+.pytest_cache/
+*.pyc
+AI_CONTEXT.md
+handover.md
+traffic light.zip
+cyberimmunity.ipynb
