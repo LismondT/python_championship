@@ -101,6 +101,10 @@ traffic_lights_allowed_configurations = [
     {"direction_1": "off", "direction_2": "off"},
     {"direction_1": "green", "direction_2": "red"},
     {"direction_1": "green", "direction_2": "yellow"},
+
+    # Задание 2
+    {"direction_1": "yellow_blinking", "direction_2": "yellow_blinking"},
+    
 ]
 
 
