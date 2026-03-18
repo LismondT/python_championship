@@ -12,8 +12,9 @@
 
 from dataclasses import dataclass
 from queue import Queue, Empty
+from random import choice
 from threading import Thread
-from time import sleep
+from time import sleep, time
 import json
 
 
@@ -275,6 +276,9 @@ class ControlSystem(Thread):
         # создаём собственную очередь, в которую монитор сможет положить сообщения для этой сущности
         self._own_queue = Queue()
 
+        self._control_queue: Queue[ControlEvent] = Queue()
+        self._running: bool = True
+
     # выдаёт собственную очередь для взаимодействия
     def entity_queue(self):
         return self._own_queue
@@ -282,24 +286,42 @@ class ControlSystem(Thread):
     # основной код сущности
     def run(self):
         print(f"[{self.__class__.__name__}] старт")
-        print(f"[{self.__class__.__name__}] отправляем тестовый запрос")
 
-        # (эту логику нужно будет изменить в задании 1)
-        # mode = {"direction_1": "green", "direction_2": "red"}
-        
-        # Задание 1
-        mode = {"direction_1": "green", "direction_2": "green"}
+        while self._running:
+            print(f"[{self.__class__.__name__}] отправляем тестовый запрос")
 
-        # запрос для сущности WorkerB - "скажи hello"
-        event = Event(
-            source=self.__class__.__name__,
-            destination="LightsGPIO",
-            operation="set_mode",
-            parameters=json.dumps(mode),
-        )
+            choice_items = ["red", "yellow", "yellow_blinking", "green"]
+            mode = {"direction_1": choice(choice_items),
+                    "direction_2": choice(choice_items)}
 
-        self.monitor_queue.put(event)
+            event = Event(
+                source=self.__class__.__name__,
+                destination="LightsGPIO",
+                operation="set_mode",
+                parameters=json.dumps(mode),
+            )
+
+            self.monitor_queue.put(event)
+
+            sleep(3)
+            
+            self._check_controls()
+
         print(f"[{self.__class__.__name__}] завершение работы")
+    
+    def stop(self):
+        self._control_queue.put(ControlEvent(operation="stop"))
+    
+    def _check_controls(self):
+        try:
+            event = self._control_queue.get_nowait()
+            
+            print(f"[{self.__class__.__name__}] проверяем запрос {event}")
+            
+            if isinstance(event, ControlEvent) and event.operation == "stop":
+                self._running = False
+        except Empty:
+            pass
 
 
 """
@@ -322,14 +344,17 @@ class LightsGPIO(Thread):
         # состояние для дидактики и тестов
         self.current_mode = None
 
+        self._control_queue: Queue[ControlEvent] = Queue()
+        self._running = True
+
     def entity_queue(self):
         return self._own_queue
 
     # основной код сущности
     def run(self):
         print(f"[{self.__class__.__name__}] старт")
-        attempts = 10
-        while attempts > 0:
+        
+        while self._running:
             try:
                 event: Event = self._own_queue.get_nowait()
                 if event.operation == "set_mode":
@@ -343,10 +368,9 @@ class LightsGPIO(Thread):
                         self.current_mode = None
                     if self.current_mode is not None:
                         self._print_terminal_state(self.current_mode)
-                    break
             except Empty:
                 sleep(0.2)
-                attempts -= 1
+        
         print(f"[{self.__class__.__name__}] завершение работы")
 
     def _print_terminal_state(self, mode: dict) -> None:
@@ -359,6 +383,21 @@ class LightsGPIO(Thread):
         d1 = icons.get(mode.get("direction_1", "off"), "⚪")
         d2 = icons.get(mode.get("direction_2", "off"), "⚪")
         print(f"[{self.__class__.__name__}] состояние: direction_1 {d1}  direction_2 {d2}")
+    
+    def stop(self):
+        self._control_queue.put(ControlEvent(operation="stop"))
+    
+    def _check_controls(self):
+        try:
+            event = self._control_queue.get_nowait()
+
+            print(f"[{self.__class__.__name__}] проверяем запрос {event}")
+
+            if isinstance(event, ControlEvent) and event.operation == "stop":
+                self._running = False
+        except Empty:
+            pass
+        
 
 
 """
@@ -439,8 +478,10 @@ def run_demo() -> None:
     """
     Теперь останавливаем
     """
-    sleep(2)
+    sleep(60)
     monitor.stop()
+    control_system.stop()
+    lights_gpio.stop()
 
     control_system.join()
     lights_gpio.join()
