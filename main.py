@@ -104,7 +104,19 @@ traffic_lights_allowed_configurations = [
 
     # Задание 2
     {"direction_1": "yellow_blinking", "direction_2": "yellow_blinking"},
-    
+
+    # Задание 3
+    {"direction_1": "green", "direction_1_left": "green", "direction_1_right": "green",
+     "direction_2": "red", "direction_2_right": "green"},
+
+    {"direction_1": "red", "direction_1_left": "red", "direction_1_right": "red",
+    "direction_2": "red", "direction_2_left": "red", "direction_2_right": "red"},
+
+    {"direction_1": "red", "direction_1_left": "red", "direction_1_right": "red",
+    "direction_2": "green", "direction_2_left": "green", "direction_2_right": "green"},
+
+    {"direction_1": "red", "direction_1_left": "green", "direction_1_right": "red",
+    "direction_2": "red", "direction_2_left": "green", "direction_2_right": "red"}
 ]
 
 
