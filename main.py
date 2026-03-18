@@ -269,7 +269,10 @@ class ControlSystem(Thread):
         print(f"[{self.__class__.__name__}] отправляем тестовый запрос")
 
         # (эту логику нужно будет изменить в задании 1)
-        mode = {"direction_1": "green", "direction_2": "red"}
+        # mode = {"direction_1": "green", "direction_2": "red"}
+        
+        # Задание 1
+        mode = {"direction_1": "green", "direction_2": "green"}
 
         # запрос для сущности WorkerB - "скажи hello"
         event = Event(
