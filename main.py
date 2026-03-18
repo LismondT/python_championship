@@ -121,19 +121,63 @@ traffic_lights_allowed_configurations = [
 ]
 
 
-class ModeChecker:
-    """Простой помощник для проверки допустимости конфигураций светофора."""
+class ModeChecker(Thread):
+    """Класс для проверки допустимости конфигураций светофора."""
+    
+    def __init__(self, monitor_queue: Queue):
+        super().__init__()
+        self.monitor_queue = monitor_queue
+        self._own_queue = Queue()
+        self._allowed = traffic_lights_allowed_configurations
+        self._control_queue: Queue[ControlEvent] = Queue()
+        self._running = True
 
-    def __init__(self, allowed_configurations):
-        self._allowed = allowed_configurations
+    def entity_queue(self):
+        return self._own_queue
 
     def is_allowed(self, mode_str: str) -> bool:
         try:
             mode = json.loads(mode_str)
-            print(f"[монитор] проверяем конфигурацию {mode}")
+            print(f"[ModeChecker] проверяем конфигурацию {mode}")
             return mode in self._allowed
         except Exception:
             return False
+
+    def run(self):
+        print("[ModeChecker] старт")
+        
+        while self._running:
+            try:
+                event: Event = self._own_queue.get_nowait()
+                print(f"[ModeChecker] получил событие {event}")
+                
+                if event.operation == "check_mode":
+                    is_allowed = self.is_allowed(event.parameters)
+                    result_event = Event(
+                        source=self.__class__.__name__,
+                        destination="Monitor",
+                        operation="mode_check_result",
+                        parameters=json.dumps({"allowed": is_allowed, "original_event": event.parameters})
+                    )
+                    self.monitor_queue.put(result_event)
+                    
+            except Empty:
+                sleep(0.2)
+            
+            self._check_controls()
+        
+        print("[ModeChecker] завершение работы")
+
+    def stop(self):
+        self._control_queue.put(ControlEvent(operation="stop"))
+    
+    def _check_controls(self):
+        try:
+            request = self._control_queue.get_nowait()
+            if isinstance(request, ControlEvent) and request.operation == "stop":
+                self._running = False
+        except Empty:
+            pass
 
 
 # Класс, реализующий поведение монитора безопасности
@@ -146,7 +190,9 @@ class Monitor(Thread):
         self._control_q = Queue()  # очередь управляющих команд (например, для остановки монитора)
         self._entity_queues = {}   # словарь очередей известных монитору сущностей
         self._force_quit = False   # флаг завершения работы монитора
-        self._mode_checker = ModeChecker(traffic_lights_allowed_configurations)
+        
+        # Теперь это отдельная сущность
+        # self._mode_checker = ModeChecker(traffic_lights_allowed_configurations)
 
     # регистрация очереди новой сущности
     def add_entity_queue(self, entity_id: str, queue: Queue):
@@ -170,14 +216,35 @@ class Monitor(Thread):
         #
 
         # пример политики безопасности
+        # if event.source == "ControlSystem" \
+        #         and event.destination == "LightsGPIO" \
+        #         and event.operation == "set_mode" \
+        #         and self._mode_checker.is_allowed(event.parameters):
+        #     authorized = True
+
+
+        # ControlSystem может отправлять только ModeChecker запросы на проверку режима
         if event.source == "ControlSystem" \
-                and event.destination == "LightsGPIO" \
-                and event.operation == "set_mode" \
-                and self._mode_checker.is_allowed(event.parameters):
+                and event.destination == "ModeChecker" \
+                and event.operation == "check_mode":
             authorized = True
+
+        # ModeChecker может отправлять результаты проверки только в Monitor
+        elif event.source == "ModeChecker" \
+                and event.destination == "Monitor" \
+                and event.operation == "mode_check_result":
+            authorized = True
+
+        # Monitor может отправлять разрешенные команды в LightsGPIO
+        elif event.source == "Monitor" \
+                and event.destination == "LightsGPIO" \
+                and event.operation == "set_mode":
+            authorized = True
+
 
         if authorized is False:
             print("[монитор] событие не разрешено политиками безопасности")
+
         return authorized
 
     # выполнение разрешённого запроса
@@ -203,6 +270,11 @@ class Monitor(Thread):
 
         if not isinstance(event, Event):
             return False
+
+        # Проверка результата ModeChecker
+        if event.operation == "mode_check_result" and event.source == "ModeChecker":
+            self._handle_check_mode_result(event)
+            return True
 
         if event.destination not in self._entity_queues:
             print("[монитор] неизвестная сущность-получатель")
@@ -256,6 +328,23 @@ class Monitor(Thread):
         except Empty:
             # никаких команд не поступило, ну и ладно
             pass
+    
+    def _handle_check_mode_result(self, event: Event):
+        try:
+            result = json.loads(event.parameters)
+            if result.get("allowed"):
+                original_event = result.get("original_event")
+                set_mode_event = Event(
+                    source="Monitor",
+                    destination="LightsGPIO",
+                    operation="set_mode",
+                    parameters=original_event
+                )
+                self._proceed(set_mode_event)
+            else:
+                print("[Monitor] режим не разрешен, команда заблокирована")
+        except Exception as e:
+            print(f"[Monitor] ошибка обработки результата проверки: {e}")
 
 
 """
@@ -294,17 +383,22 @@ class ControlSystem(Thread):
             mode = {"direction_1": choice(choice_items),
                     "direction_2": choice(choice_items)}
 
+            # event = Event(
+            #     source=self.__class__.__name__,
+            #     destination="LightsGPIO",
+            #     operation="set_mode",
+            #     parameters=json.dumps(mode),
+            # )
+
             event = Event(
                 source=self.__class__.__name__,
-                destination="LightsGPIO",
-                operation="set_mode",
+                destination="ModeChecker",
+                operation="check_mode",
                 parameters=json.dumps(mode),
             )
 
             self.monitor_queue.put(event)
-
             sleep(3)
-            
             self._check_controls()
 
         print(f"[{self.__class__.__name__}] завершение работы")
@@ -439,13 +533,16 @@ class SelfDiagnosticsSystem(Thread):
 
 
 def _build_system():
+    mode_checker = ModeChecker(monitor_events_queue)
     monitor = Monitor(monitor_events_queue)
     control_system = ControlSystem(monitor_events_queue)
     lights_gpio = LightsGPIO(monitor_events_queue)
-    return monitor, control_system, lights_gpio
+
+    return mode_checker, monitor, control_system, lights_gpio
 
 
-def _register_entities(monitor: Monitor, control_system: ControlSystem, lights_gpio: LightsGPIO):
+def _register_entities(mode_checker: ModeChecker, monitor: Monitor, control_system: ControlSystem, lights_gpio: LightsGPIO):
+    monitor.add_entity_queue(mode_checker.__class__.__name__, mode_checker.entity_queue())
     monitor.add_entity_queue(control_system.__class__.__name__, control_system.entity_queue())
     monitor.add_entity_queue(lights_gpio.__class__.__name__, lights_gpio.entity_queue())
 
@@ -454,12 +551,12 @@ def run_demo() -> None:
     """
     Инициализируем монитор и сущности
     """
-    monitor, control_system, lights_gpio = _build_system()
+    mode_checker, monitor, control_system, lights_gpio = _build_system()
 
     """
     регистрируем очереди сущностей в мониторе
     """
-    _register_entities(monitor, control_system, lights_gpio)
+    _register_entities(mode_checker, monitor, control_system, lights_gpio)
 
     """
     Запускаем всё
@@ -471,6 +568,7 @@ def run_demo() -> None:
     Диаграмма последовательности вызовов (https://www.plantuml.com/plantuml/png/dPBVIiCm6CNlynIvdtk1NSZ02n4KXJr1w886-cUqcR0xgoBpIdoJLgqhtRg-mfStygJPM3js9OLyoPTpVia97ITQn7eU-6o6gZmr4w7c5r6euyYVB18j0ouIxhb6JpIHtZnMUd4JXKf7iPK5RjgJNQlx1vrStbtTMeNVhXZR0VdmV6yQ34QSQjhI5sNcWrE5QMrUgQHlysAUq7oZqcxyq1hbW6KxG8S5KWEBPHMe5MLeOBa6uHd4YWbVSs1JQg1OKktEF3ATSTI2Vk7Os6b6AupGerctn3uM5WWfn_OAxGRGr4OogTtktjCzmt3utyZ2q-fHQBb_JrSEv177oHigRB1E2ChOL1vxfPz8ZWjdBhv9ELn5Bw_vfFf4L2fFlZsEtkBBpNjxWH8mkyHWbbZbC1TCXbCsne1Vxmy0)
     """
 
+    mode_checker.start()
     monitor.start()
     control_system.start()
     lights_gpio.start()
@@ -480,12 +578,14 @@ def run_demo() -> None:
     """
     sleep(60)
     monitor.stop()
+    mode_checker.stop()
     control_system.stop()
     lights_gpio.stop()
 
     control_system.join()
     lights_gpio.join()
     monitor.join()
+    mode_checker.join()
 
 
 def main() -> None:
